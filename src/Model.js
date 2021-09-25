@@ -495,6 +495,9 @@ export class Model {
 
         fields = Object.values(fields).filter(f => f.unique && f.attribute != hash && f.attribute != sort)
 
+        if (this.timestamps) {
+            properties[this.updatedField] = properties[this.createdField] = new Date()
+        }
         params.prepared = properties = this.prepareProperties('put', properties, params)
 
         for (let field of fields) {
@@ -747,10 +750,11 @@ export class Model {
     /* private */
     async putItem(properties, params = {}) {
         ({params, properties} = this.checkArgs(properties, params))
-        if (this.timestamps) {
-            properties[this.updatedField] = properties[this.createdField] = new Date()
-        }
+
         if (!params.prepared) {
+            if (this.timestamps) {
+                properties[this.updatedField] = properties[this.createdField] = new Date()
+            }
             properties = this.prepareProperties('put', properties, params)
         }
         let expression = new Expression(this, 'put', properties, params)
