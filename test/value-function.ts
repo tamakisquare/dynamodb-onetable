@@ -1,5 +1,5 @@
 /*
-    value-function.ts - 
+    value-function.ts -
  */
 import {AWS, Client, Match, Table, print, dump, delay} from './utils/init'
 
@@ -9,14 +9,15 @@ const table = new Table({
     logger: true,
     timestamps: true,
     schema: {
+        version: '0.0.1',
         indexes: {
             primary: { hash: 'pk', sort: 'sk' },
         },
         models: {
             User: {
                 pk: { type: String, value: 'user#${email}' },
-                sk: { 
-                    type: String, 
+                sk: {
+                    type: String,
                     value: (propertyName, properties: any) => {
                         return `user#${properties.email}`
                     },
@@ -42,7 +43,6 @@ test('Create Table', async() => {
 test('Test value template function for SK', async () => {
     let user = await User.create({email: 'peter@example.com', name: 'Peter Smith'})
     expect(user).toMatchObject({
-        _type: 'User',
         email: 'peter@example.com',
         name: 'Peter Smith',
     })

@@ -22,11 +22,16 @@ test('Create Table', async() => {
     }
 })
 
-//type UserType = Entity<typeof Schema.models.User>
-//let User = table.getModel<UserType>('User')
-//let user: UserType = null
+type UserType = Entity<typeof DebugSchema.models.User>
+let User = table.getModel<UserType>('User')
+let user: UserType = null
 
 test('Test', async() => {
+    user = await User.create({
+        email: 'rr@acme.com',
+        data: {id: '42'},
+    }, {hidden: true, exists: null, log: false})
+    // dump("USER", user)
 })
 
 test('Destroy Table', async() => {

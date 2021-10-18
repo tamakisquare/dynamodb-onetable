@@ -41,7 +41,7 @@ Join the active community using OneTable on our [GitHub Discussion Hub](https://
 * No module dependencies.
 * Support for the AWS SDK v3.
 * TypeScript type inference from schema for full type validation on APIs, parameters, returns, and entities and attributes.
-* Migrations via the [Onetable Migration Controller](https://github.com/sensedeep/dynamodb-onetable) controller and the [Onetable CLI](https://github.com/sensedeep/onetable-cli).
+* Migrations support via [OneTable Migrate](https://github.com/sensedeep/onetable-migrate) and [OneTable CLI](https://github.com/sensedeep/onetable-cli).
 * Graphical monitoring of single-table performance via [SenseDeep](https://www.sensedeep.com).
 
 ## Installation
@@ -94,6 +94,7 @@ Schemas define how items will be stored in your database and look like this:
 
 ```javascript
 const MySchema = {
+    version: '0.0.1',
     indexes: {
         primary: { hash: 'pk', sort: 'sk' },
         gs1:     { hash: 'gs1pk', sort: 'gs1sk', follow: true },
@@ -217,7 +218,6 @@ await User.update({id: user.id, role: 'user'}, {transaction})
 await table.transact('write', transaction)
 ```
 
-
 ## TypeScript
 
 OneTable provides TypeScript type declaration files so that OneTable APIs, requests and responses can be fully type checked.
@@ -232,6 +232,7 @@ For example:
 import {Entity, Model, Table} from 'dynamodb-onetable'
 
 const MySchema = {
+    ...
     models: {
         Account: {
             pk:    { type: String, value: 'account:${name}' },
@@ -511,8 +512,11 @@ The valid properties of the `schema` object are:
 
 | Property | Type | Description |
 | -------- | :--: | ----------- |
-| indexes | `object` | Hash of indexes used by the table |
-| models | `object` | Hash of model entities describing the model keys, indexes and attributes |
+| format | `string` | Reserved. Set to 'onetable:1.0.0' |
+| indexes | `object` | Hash of indexes used by the table. |
+| models | `object` | Hash of model entities describing the model keys, indexes and attributes. |
+| params | `object` | Hash of model entities describing the model keys, indexes and attributes. |
+| version | `string` | A Semver compatible version string. |
 
 #### Indexes
 

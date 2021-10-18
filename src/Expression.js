@@ -313,7 +313,8 @@ export class Expression {
         if (params.remove && params.remove.indexOf(field.name) >= 0) {
             return
         }
-        if (field.isIndexed && params.updateIndexes !== true) {
+        if (field.isIndexed && params.updateIndexes !== true && params.exists !== null) {
+            //  Update indexes if explicitly requested or doing update(, {exists: null}), i.e. create.
             return
         }
         updates.set.push(`#_${this.addName(att)} = :_${this.addValue(value)}`)
@@ -384,7 +385,7 @@ export class Expression {
             } else {
                 subscript = ''
             }
-            let field = fields[prop]
+            let field = fields ? fields[prop] : null
             if (field) {
                 target.push(`#_${this.addName(field.attribute[0])}${subscript}`)
                 //  If nested schema, advance to the next level
@@ -393,9 +394,6 @@ export class Expression {
                 //  No field, so just use the property name.
                 target.push(`#_${this.addName(prop)}${subscript}`)
                 fields = null
-            }
-            if (fields == null) {
-                break
             }
         }
         return target.join('.')

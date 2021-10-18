@@ -91,7 +91,7 @@ export class Model {
         if (!prefix) {
             //  Top level only
             if (!schemaFields[this.typeField]) {
-                schemaFields[this.typeField] = { type: String }
+                schemaFields[this.typeField] = { type: String, hidden: true }
             }
             if (this.timestamps) {
                 schemaFields[this.createdField] = schemaFields[this.createdField] || { type: Date }
@@ -181,11 +181,6 @@ export class Model {
                 this.nested = true
             }
         }
-        if (!prefix) {
-            if (!this.hash || (primary.sort && !this.sort)) {
-                throw new Error(`dynamo: Cannot find primary keys for model "${this.name}" in primary index`)
-            }
-        }
         if (Object.values(fields).find(f => f.unique && f.attribute != this.hash && f.attribute != this.sort)) {
             this.hasUniqueFields = true
         }
@@ -217,7 +212,7 @@ export class Model {
             return
         }
         if (field.value) {
-            let vars = this.getVars(field.value)
+            let vars = this.table.getVars(field.value)
             for (let pathname of vars) {
                 let name = pathname.split('.').shift()
                 let ref = fields[name]
@@ -232,25 +227,9 @@ export class Model {
     getPropValue(properties, path) {
         let v = properties
         for (let part of path.split('.')) {
-            v = properties[part]
+            v = v[part]
         }
         return v
-    }
-
-    /*
-        Return the value template variable references in a list
-     */
-    getVars(v) {
-        let list = []
-        if (Array.isArray(v)) {
-            list = v
-        } else if (typeof v != 'function') {
-            //  FUTURE - need 'depends' to handle function dependencies
-            v.replace(/\${(.*?)}/g, (match, varName) => {
-                list.push(varName)
-            })
-        }
-        return list
     }
 
     /*
@@ -421,15 +400,20 @@ export class Model {
             if (result.LastEvaluatedKey) {
                 //  DEPRECATE items.start in 2.0
                 items.start = items.next = this.table.unmarshall(result.LastEvaluatedKey)
+                Object.defineProperty(items, 'next', {enumerable: false})
             }
             if (params.count || params.select == 'COUNT') {
                 items.count = result.Count
+                Object.defineProperty(items, 'count', {enumerable: false})
             }
             if (prev) {
                 items.prev = this.table.unmarshall(prev)
+                Object.defineProperty(items, 'prev', {enumerable: false})
             }
-            if (params.prev) {
+            if (params.prev && op != 'scan') {
+                //  DynamoDB scan ignores ScanIndexForward
                 items = items.reverse()
+                let tmp = items.prev ; items.prev = items.next ; items.next = tmp
             }
             return items
         }
@@ -805,6 +789,7 @@ export class Model {
             params.where = where.join(' or ')
         }
         params.parse = true
+        params.hidden = true
 
         let items = await this.queryItems(properties, params)
         return this.table.groupByType(items)
@@ -838,7 +823,7 @@ export class Model {
             if (sub) {
                 value = value[sub]
             }
-            if (field.crypt) {
+            if (field.crypt && params.decrypt !== false) {
                 value = this.decrypt(value)
             }
             if (field.default !== undefined && value === undefined) {
@@ -868,6 +853,9 @@ export class Model {
                     rec[name] = value
                 }
             }
+        }
+        if (params.hidden == true && rec[this.typeField] === undefined) {
+            rec[this.typeField] = this.name
         }
         if (this.table.transform && ReadWrite[op] == 'read') {
             rec = this.table.transform(this, op, rec, params, raw)
@@ -1052,11 +1040,18 @@ export class Model {
                     continue
                 }
                 if (rec[name] === undefined) {
-                    //  No type transformations - don't have enough info without fields
-                    rec[name] = value
+                    //  Cannot do all type transformations - don't have enough info without fields
+                    if (value instanceof Date) {
+                        if (this.table.isoDates) {
+                            rec[name] = value.toISOString()
+                        } else {
+                            rec[name] = value.getTime()
+                        }
+                    } else {
+                        rec[name] = value
+                    }
                 }
             }
-            return rec
         }
         return rec
     }
@@ -1179,7 +1174,6 @@ export class Model {
             Support ${var:length:pad-character} which is useful for sorting.
         */
         value = value.replace(/\${(.*?)}/g, (match, varName) => {
-            //  TODO need to handle "." split as well
             let [name, len, pad] = varName.split(':')
             let v = this.getPropValue(properties, name)
             if (v !== undefined) {

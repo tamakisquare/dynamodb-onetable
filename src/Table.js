@@ -88,7 +88,12 @@ const DynamoOps = {
 }
 
 const GenericModel = '_Generic'
+const MigrationModel = '_Migration'
+const SchemaModel = '_Schema'
+const UniqueModel = '_Unique'
 const SchemaKey = '_schema'
+const UniqueKey = '_unique'
+const SchemaFormat = 'onetable:1.0.0'
 
 /*
     Represent a single DynamoDB table
@@ -122,6 +127,10 @@ export class Table {
         }
         this.setParams(params)
         this.setSchema(params.schema)
+        this.createUniqueModel()
+        this.createGenericModel()
+        this.createSchemaModel()
+        this.createMigrationModel()
     }
 
     setParams(params) {
@@ -207,46 +216,107 @@ export class Table {
     */
     getSchema() {
         let schema = this.merge({}, this.schema, {params: this.getParams()})
-        return this.mapSchema(schema)
+        return this.transformSchemaForWrite(schema)
     }
 
-    mapSchema(schema) {
-        //  Get field types (may have been constructors)
-        for (let [name, model] of Object.entries(this.models)) {
-            for (let [fname, field] of Object.entries(model.block.fields)) {
-                if (schema.models[name][fname]) {
-                    schema.models[name][fname].type = field.type
-                    if (field.validate && field.validate instanceof RegExp) {
-                        schema.models[name][fname].validate = `/${field.validate.source}/${field.validate.flags}`
-                    }
+    //  Prepare for persisting the schema
+    transformSchemaForWrite(schema) {
+        let params = schema.params || this.getParams()
+        for (let [name, model] of Object.entries(schema.models)) {
+            for (let [fname, field] of Object.entries(model)) {
+                if (field.validate && field.validate instanceof RegExp) {
+                    schema.models[name][fname].validate = `/${field.validate.source}/${field.validate.flags}`
                 }
+                let type = (typeof field.type == 'function') ? field.type.name : field.type
+                field.type = type.toLowerCase()
             }
+            delete model[params.typeField]
+        }
+        delete schema.models[SchemaModel]
+        delete schema.models[MigrationModel]
+        return schema
+    }
+
+    transformSchemaAfterRead(schema) {
+        if (!schema.name) {
+            schema.name == 'Current'
+        }
+        schema.models[SchemaModel] = this.schemaFields
+        schema.models[MigrationModel] = this.migrationFields
+        let params = schema.params || this.getParams()
+        for (let [modelName, mdef] of Object.entries(schema.models)) {
+            if (params.timestamps) {
+                mdef[params.createdField] = {name: params.createdField, type: 'date'}
+                mdef[params.updatedField] = {name: params.updatedField, type: 'date'}
+            }
+            mdef[params.typeField] = {name: params.typeField, type: 'string'}
         }
         return schema
     }
 
     /*
-        Read the schema saved in the table
+        Read the current schema saved in the table
     */
     async readSchema() {
         let indexes = this.indexes
         let primary = indexes.primary
 
         if (indexes == DefaultIndexes) {
-            let info = await this.describeTable()
-            let primary = {}
-            for (let key of info.Table.KeySchema) {
-                let type = key.KeyType.toLowerCase() == 'hash' ? 'hash' : 'sort'
-                primary[type] = key.AttributeName
-            }
+            ({primary} = await this.getTableKeys())
         }
         let params = {
             [primary.hash]: SchemaKey
         }
         if (primary.sort) {
-            params[primary.sort] = SchemaKey
+            params[primary.sort] = `${SchemaKey}:Current`
         }
-        return await this.getItem(params, {hidden: true, parse: true})
+        let schema = await this.getItem(params, {hidden: true, parse: true})
+        return this.transformSchemaAfterRead(schema)
+    }
+
+    async readSchemas() {
+        let indexes = this.indexes
+        let primary = indexes.primary
+
+        if (indexes == DefaultIndexes) {
+            ({primary} = await this.getTableKeys())
+        }
+        let params = {
+            [primary.hash]: `${SchemaKey}:`
+        }
+        /*
+        if (primary.sort) {
+            params[primary.sort] = {begins: SchemaKey}
+        } */
+        let schemas = await this.queryItems(params, {hidden: true, parse: true})
+        for (let [index, schema] of Object.entries(schemas)) {
+            schemas[index] = this.transformSchemaAfterRead(schema)
+        }
+        return schemas
+    }
+
+    async getTableKeys(refresh = false) {
+        if (this.described && !refresh) {
+            return this.described
+        }
+        let info = await this.describeTable()
+        let indexes = {primary: {}}
+        for (let key of info.Table.KeySchema) {
+            let type = key.KeyType.toLowerCase() == 'hash' ? 'hash' : 'sort'
+            indexes.primary[type] = key.AttributeName
+        }
+        if (info.Table.GlobalSecondaryIndexes) {
+            for (let index of info.Table.GlobalSecondaryIndexes) {
+                let keys = indexes[index.IndexName] = {}
+                for (let key of index.KeySchema) {
+                    let type = key.KeyType.toLowerCase() == 'hash' ? 'hash' : 'sort'
+                    keys[type] = key.AttributeName
+                }
+                indexes[index.IndexName] = keys
+            }
+        }
+        this.described = indexes
+        return this.described
     }
 
     /*
@@ -256,24 +326,81 @@ export class Table {
     async saveSchema(schema) {
         if (schema) {
             schema = this.merge({}, schema)
-            schema = this.mapSchema(schema)
             if (!schema.params) {
                 schema.params = this.getParams()
             }
+            if (!schema.models) {
+                schema.models = {}
+            }
+            if (!schema.indexes) {
+                schema.indexes = this.indexes || DefaultIndexes
+            }
+            if (!schema.queries) {
+                schema.queries = {}
+            }
+            schema = this.transformSchemaForWrite(schema)
         } else {
             schema = this.getSchema()
         }
         if (!schema) {
             throw new Error('No schema to save')
         }
-        let primary = this.indexes.primary
-        schema[primary.hash] = SchemaKey
-        if (primary.sort) {
-            schema[primary.sort] = SchemaKey
+        //  REPAIR no name
+        if (!schema.name) {
+            schema.name = 'Current'
         }
-        schema[this.typeField] = '_Schema'
-        await this.putItem(schema)
-        return schema
+        schema.version = schema.version || '0.0.1'
+        schema.format = SchemaFormat
+
+        //  LEGACY
+        // schema.models[SchemaModel] = this.schemaFields
+        // schema.models[MigrationModel] = this.migrationFields
+
+        let model = this.getModel(SchemaModel)
+        return await model.update(schema, {exists: null})
+    }
+
+    async removeSchema(schema) {
+        let model = this.getModel(SchemaModel)
+        await model.remove(schema)
+    }
+
+    /*
+        Set the schema and models. If schema is unset, then this clears the prior schema.
+        NOTE: does not update the saved schema in the table.
+    */
+    setSchema(schema) {
+        this.models = {}
+        this.indexes = DefaultIndexes
+
+        if (!schema) return
+
+        if (!schema.version) {
+            throw new Error('Schema is missing a version')
+        }
+        let {models, indexes, params} = schema
+        if (!models) {
+            models = {}
+        }
+        if (!indexes) {
+            indexes = DefaultIndexes
+        }
+        this.indexes = indexes
+        //  Must set before creating models
+        if (params) {
+            this.setParams(params)
+        }
+        for (let [name, model] of Object.entries(models)) {
+            if (name == SchemaModel || name == MigrationModel) continue
+            this.models[name] = new Model(this, name, {fields: model, indexes})
+        }
+        this.schema = schema
+
+        //  Must re-create as delimiter may have changed (currently schema & migration hard coded with ':' delimiter)
+        this.createUniqueModel()
+        this.createGenericModel()
+        this.createSchemaModel()
+        this.createMigrationModel()
     }
 
     getParams() {
@@ -291,35 +418,6 @@ export class Table {
     }
 
     /*
-        Set the schema and creating models for all the entities.
-        NOTE: does not update the saved schema in the table.
-    */
-    setSchema(schema) {
-        this.models = {}
-        this.indexes = DefaultIndexes
-
-        if (schema) {
-            let {models, indexes} = schema
-            if (!models) {
-                throw new Error('Schema is missing models')
-            }
-            if (!indexes) {
-                throw new Error('Schema is missing indexes')
-            }
-            this.indexes = indexes
-            for (let [name, model] of Object.entries(models)) {
-                this.models[name] = new Model(this, name, {fields: model, indexes})
-            }
-            if (schema.params) {
-                this.setParams(schema.params)
-            }
-            this.schema = schema
-        }
-        this.createUniqueModel()
-        this.createGenericModel()
-    }
-
-    /*
         Model for unique attributes
      */
     createUniqueModel() {
@@ -332,12 +430,12 @@ export class Table {
         */
         let sep = this.params.legacyUnique || this.delimiter
         let fields = {
-            [primary.hash]: { type: String, value: `_unique${sep}\${` + primary.hash + '}'},
+            [primary.hash]: { type: String, value: `${UniqueKey}${sep}\${` + primary.hash + '}'},
         }
         if (primary.sort) {
-            fields[primary.sort] = { type: String, value: `_unique${sep}`}
+            fields[primary.sort] = { type: String, value: `${UniqueKey}${sep}`}
         }
-        this.uniqueModel = new Model(this, '_Unique', {
+        this.uniqueModel = new Model(this, UniqueModel, {
             fields: fields,
             indexes: this.indexes,
             timestamps: false
@@ -353,12 +451,47 @@ export class Table {
         if (primary.sort) {
             fields[primary.sort] = {type: String}
         }
-        this.genericModel = new Model(this, 'GenericModel', {
+        this.genericModel = new Model(this, GenericModel, {
             fields: fields,
             indexes: this.indexes,
             timestamps: false,
             generic: true,
         })
+    }
+
+    createSchemaModel() {
+        let indexes = this.indexes
+        let primary = indexes.primary
+        //  Delimiter here is hard coded because we need to be able to read a schema before we know what the delimiter is.
+        let delimiter = ':'
+        let fields = this.schemaFields = {
+            [primary.hash]: { type: 'string', required: true, value: `${SchemaKey}${delimiter}` },
+            [primary.sort]: { type: 'string', required: true, value: `${SchemaKey}${delimiter}\${name}` },
+            format:         { type: 'string', required: true },
+            name:           { type: 'string', required: true },
+            indexes:        { type: 'array',  required: true },
+            models:         { type: 'array',  required: true },
+            params:         { type: 'object', required: true },
+            queries:        { type: 'object', required: true },
+            version:        { type: 'string', required: true },
+        }
+        this.models[SchemaModel] = this.schemaModel = new Model(this, SchemaModel, {fields, indexes, delimiter})
+    }
+
+    createMigrationModel() {
+        let indexes = this.indexes
+        let primary = indexes.primary
+        //  Delimiter here is hard coded because we need to be able to read a migration/schema before we know what the delimiter is.
+        let delimiter = ':'
+        let fields = this.migrationFields = {
+            [primary.hash]: { type: 'string', value: `_migrations${delimiter}` },
+            [primary.sort]: { type: 'string', value: `_migrations${delimiter}\${version}` },
+            description:    { type: 'string', required: true },
+            date:           { type: 'date',   required: true },
+            path:           { type: 'string', required: true },
+            version:        { type: 'string', required: true },
+        }
+        this.models[MigrationModel] = this.migrationModel = new Model(this, MigrationModel, {fields, indexes, delimiter})
     }
 
     /*
@@ -655,6 +788,11 @@ export class Table {
                 this.addMetrics(model, op, result, params, mark)
             }
         }
+        if (typeof params.info == 'object') {
+            params.info.operation = DynamoOps[op]
+            params.info.args = cmd
+            params.info.properties = properties
+        }
         return result
     }
 
@@ -667,7 +805,7 @@ export class Table {
         }
         batch.ConsistentRead = params.consistent ? true : false
 
-        let result = await this.execute('GenericModel', 'batchGet', batch, {}, params)
+        let result = await this.execute(GenericModel, 'batchGet', batch, {}, params)
 
         let response = result.Responses
         if (params.parse && response) {
@@ -690,7 +828,7 @@ export class Table {
         if (Object.getOwnPropertyNames(batch).length == 0) {
             return {}
         }
-        return await this.execute('GenericModel', 'batchWrite', batch, params)
+        return await this.execute(GenericModel, 'batchWrite', batch, params)
     }
 
     async deleteItem(properties, params) {
@@ -725,7 +863,7 @@ export class Table {
         Invoke a prepared transaction. Note: transactGet does not work on non-primary indexes.
      */
     async transact(op, transaction, params = {}) {
-        let result = await this.execute('GenericModel', op == 'write' ? 'transactWrite' : 'transactGet', transaction, params)
+        let result = await this.execute(GenericModel, op == 'write' ? 'transactWrite' : 'transactGet', transaction, params)
         if (op == 'get') {
             if (params.parse) {
                 let items = []
@@ -893,6 +1031,22 @@ export class Table {
 
     setMakeID(fn) {
         this.makeID = fn
+    }
+
+    /*
+        Return the value template variable references in a list
+     */
+    getVars(v) {
+        let list = []
+        if (Array.isArray(v)) {
+            list = v
+        } else if (typeof v != 'function') {
+            //  FUTURE - need 'depends' to handle function dependencies
+            v.replace(/\${(.*?)}/g, (match, varName) => {
+                list.push(varName)
+            })
+        }
+        return list
     }
 
     initCrypto(crypto) {
